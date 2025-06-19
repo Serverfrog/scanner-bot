@@ -53,8 +53,8 @@ There are **two versions** of the bot:
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/yourusername/discord-bot-scanner.git
-cd discord-bot-scanner
+git clone https://github.com/yourusername/bot-scanner.git
+cd bot-scanner
 ```
 
 ### 2. Install dependencies
@@ -83,7 +83,7 @@ If you omit any of these, the bot will prompt you to enter them manually at runt
 
 ### Prebuilt Executables
 
-You’ll find `.exe` files for both `attbot.py` and `botscanner.py` (coming soon under Releases). No setup needed—just double-click and run!
+You’ll find `.exe` files for both `attbot.py` and `botscanner.py` (under Releases, currently in Alpha, might not be super stable). No setup needed, just double-click and run.
 
 ### Docker
 

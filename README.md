@@ -22,6 +22,7 @@ This bot **IS NOT** a replacement for Apollo, rather an adaptable secondary "dro
 * `/leaderboard` - Display attendance over the last N number of events.
 * `/show_apollo_embeds` - Print raw embed data from Apollo events (for debugging).
 * `/recent_authors` - List bots/authors that posted embeds recently (to ensure Apollo is the source).
+* `/hilf` - Help command.
 * Works with **any** Apollo or event-bot-like embed, no internal API needed.
 * Modular: Add new post-processing commands without changing the scanning core.
 

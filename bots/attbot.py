@@ -157,7 +157,6 @@ async def on_raw_reaction_add(payload):
 # TODO: Set up a command like /post_summary to auto-post attendance summaries at the end of the month in a formatted embed.
 # TODO: Host the bot on a server so its always up
 # TODO: Improve /leaderboard by including the event name (if found in embed.title or embed.descriptio) not applicable for our clan (events not named)
-# TODO: Commands to print interview template, staff meeting notes -> /interview_template || /staff_meeting_template (do not publish to github)
 
 # debug attendance log
 @bot.command()

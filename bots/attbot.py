@@ -237,79 +237,26 @@ async def hilf(interaction: discord.Interaction):
 
 @bot.tree.command(name="staff_meeting_notes", description="Paste staff meeting note template.")
 async def staff_meeting_notes(interaction: discord.Interaction):
-
     await interaction.response.defer()  # defer in case it takes a moment
 
-    notes_text = """
-            Staff meeting notetaking template
+    try:
+        with open('staff_meeting_note.md', 'r', encoding='utf-8') as file:
+            notes_text = file.read()
 
-            `**Promotions and awards**
+        if not notes_text.strip():
+            await interaction.followup.send("Error: Template file is empty!")
+            return
 
+        await interaction.followup.send(notes_text)
 
-            **Astro award:-**
-
-
-            **good conduct**
-
-
-            **Red Cross**
-
-
-            **Promotions**
-
-
-            - Fox Red:
-
-            - Centurion:
-
-            
-
-            **Out of Probation**
-
-
-            __Discussion Part__
-            **Staff Notes**:-
-
-
-            __NCO TRAINED__ (if any)
-
-
-
-            __NCOs__
-
-            **Shughart**
-
-
-            **Hastings**
-
-
-            **Banjo**
-
-
-            **Rydah** 
-
-
-            **Mooses**
-
-
-            **Aranel**
-
-
-            **Miller**
-
-
-            **Astro**
-
-
-            **Landa**
-
-
-            **Adams**
-
-            **__Public Notes__** (if any)`
-"""
-    await interaction.followup.send(notes_text)
-
+    except FileNotFoundError:
+        await interaction.followup.send("Error: Template file 'staff_meeting_note.md' not found!")
+    except PermissionError:
+        await interaction.followup.send("Error: No permission to read the template file!")
+    except UnicodeDecodeError:
+        await interaction.followup.send("Error: Unable to read template file - encoding issue!")
+    except Exception as e:
+        await interaction.followup.send(f"Error: An unexpected error occurred: {str(e)}")
 
 @bot.tree.command(name="debug_apollo", description="Scan recent messages for Apollo embeds and show raw fields for debugging.")
 @app_commands.describe(limit="How many recent messages to scan (default 50)")

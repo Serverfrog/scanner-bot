@@ -232,21 +232,17 @@ def normalize_name(name: str) -> str:
 
 
 def log_attendance(user_id, username, event_id, response="accepted"):
-
     normalized_id = normalize_name(user_id)
-    pseudo_id = f"{event_id}-{normalized_id}" if response == "accepted" else f"{event_id}-{normalized_id}-declined"
 
-    if pseudo_id not in attendance_log:
-        attendance_log[pseudo_id] = {
+    entry = AttendanceEntry(
+        user_id=normalized_id,
+        username=username.strip(),
+        event_id=event_id,
+        response=response
+    )
 
-            "timestamp": datetime.now().isoformat(),
-            "user_id": normalized_id,
-
-            # preserve pretty version (username_x becomes server specific 'nickname' eg for milsim clans: pyle -> Pvt G. Pyle)
-            "username": username.strip(),
-            "event_id": event_id,
-            "response": response
-        }
+    if entry.pseudo_id not in attendance_log:
+        attendance_log[entry.pseudo_id] = entry.to_dict()
 
 @bot.event
 async def on_ready():

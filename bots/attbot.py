@@ -276,6 +276,121 @@ class AttendanceLog:
             log._entries[pseudo_id] = entry
         return log
 
+
+from dataclasses import dataclass
+from typing import List, Tuple, Dict, Optional
+from datetime import datetime
+
+
+@dataclass
+class EventEntry:
+    """
+    Class representing a single event entry.
+
+    Attributes:
+        event_id: Unique identifier for the event
+        accepted: List of tuples containing (normalized_name, display_name) for accepted users
+        declined: List of tuples containing (normalized_name, display_name) for declined users
+        timestamp: When the event was logged
+    """
+    event_id: int
+    accepted: List[Tuple[str, str]]
+    declined: List[Tuple[str, str]]
+    timestamp: str = None
+
+    def __post_init__(self):
+        if self.timestamp is None:
+            self.timestamp = datetime.now().isoformat()
+
+    def to_dict(self) -> dict:
+        """Convert entry to dictionary format"""
+        return {
+            "event_id": self.event_id,
+            "accepted": self.accepted,
+            "declined": self.declined,
+            "timestamp": self.timestamp
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> 'EventEntry':
+        """Create an EventEntry from dictionary data"""
+        return cls(**data)
+
+
+class EventLog:
+    """
+    Class managing a collection of event entries.
+    Maintains the most recent events and provides analysis methods.
+    """
+
+    def __init__(self, max_events: int = 8):
+        self._events: List[EventEntry] = []
+        self.max_events = max_events
+
+    def add_event(self, event: EventEntry) -> None:
+        """Add a new event, maintaining the maximum size limit"""
+        self._events.append(event)
+        if len(self._events) > self.max_events:
+            self._events.pop(0)
+
+    def clear(self) -> None:
+        """Clear all events"""
+        self._events.clear()
+
+    @property
+    def recent_events(self) -> List[EventEntry]:
+        """Get list of recent events"""
+        return self._events.copy()
+
+    @property
+    def total_events(self) -> int:
+        """Get total number of events stored"""
+        return len(self._events)
+
+    def get_event(self, event_id: int) -> Optional[EventEntry]:
+        """Get event by ID"""
+        for event in self._events:
+            if event.event_id == event_id:
+                return event
+        return None
+
+    def get_user_participation(self, normalized_name: str) -> Dict[str, int]:
+        """Get participation summary for a user"""
+        summary = {"accepted": 0, "declined": 0}
+        for event in self._events:
+            if any(norm == normalized_name for norm, _ in event.accepted):
+                summary["accepted"] += 1
+            if any(norm == normalized_name for norm, _ in event.declined):
+                summary["declined"] += 1
+        return summary
+
+    def get_all_participants(self) -> Dict[str, Dict[str, int]]:
+        """Get participation summary for all users"""
+        summary = {}
+        for event in self._events:
+            for norm_name, display_name in event.accepted:
+                if norm_name not in summary:
+                    summary[norm_name] = {"display_name": display_name, "accepted": 0, "declined": 0}
+                summary[norm_name]["accepted"] += 1
+
+            for norm_name, display_name in event.declined:
+                if norm_name not in summary:
+                    summary[norm_name] = {"display_name": display_name, "accepted": 0, "declined": 0}
+                summary[norm_name]["declined"] += 1
+        return summary
+
+    def to_dict(self) -> List[dict]:
+        """Convert all events to dictionary format"""
+        return [event.to_dict() for event in self._events]
+
+    @classmethod
+    def from_dict(cls, data: List[dict]) -> 'EventLog':
+        """Create an EventLog instance from dictionary data"""
+        log = cls()
+        for event_data in data:
+            log.add_event(EventEntry.from_dict(event_data))
+        return log
+
 # Create a global config instance
 bot_config = BotConfig()
 
@@ -300,7 +415,7 @@ bot = commands.Bot(command_prefix="/", intents=intents)
 attendance_log = AttendanceLog()
 
 # Holds data for the most recent 8 Apollo events
-event_log = []  # Populate this in /scan_apollo command
+event_log = EventLog()  # Populate this in /scan_apollo command
 
 
 def normalize_name(name: str) -> str:
@@ -311,10 +426,49 @@ def normalize_name(name: str) -> str:
     return name.strip()
 
 
+async def defer_response(interaction: discord.Interaction, *, thinking: bool = True) -> None:
+    """
+    Utility method to handle response deferral with proper typing.
+
+    Args:
+        interaction: The Discord interaction to defer
+        thinking: Whether to show the "thinking" state (default: True)
+    """
+    await interaction.response.defer(thinking=thinking) # type: ignore[attr-defined]
+
+
+async def send_response(interaction: discord.Interaction, content: str, *, ephemeral: bool = False) -> None:
+    """
+    Utility method to handle response sending with proper typing.
+
+    Args:
+        interaction: The Discord interaction to respond to
+        content: The content to send
+        ephemeral: Whether the message should be ephemeral (default: False)
+    """
+    if interaction.response.is_done():   # type: ignore[attr-defined]
+        await interaction.followup.send(content, ephemeral=ephemeral)
+    else:
+        await send_response(interaction,content, ephemeral=ephemeral)
 
 @bot.event
 async def on_ready():
+    """
+    Handles the on_ready event to confirm the bot's connection and synchronization status.
 
+    This event triggers when the bot is connected to Discord and ready to interact with the API. It prints
+    the bot's username to indicate a successful connection and attempts to synchronize application commands
+    with Discord. Any errors occurring during synchronization are logged.
+
+    Args:
+
+
+    Raises:
+        Exception: If an error related to syncing commands occurs.
+
+    Returns:
+        None
+    """
     print(f"Bot is connected as {bot.user}")
     print(f"Logged in as {bot.user}")
 
@@ -384,9 +538,9 @@ async def show_apollo_embeds(interaction: discord.Interaction, limit: int = 50):
                 await interaction.channel.send(f"Embed description:\n```{embed.description}```")
 
     if found == 0:
-        await interaction.response.send_message(f"No Apollo messages found in last {limit} messages.")
+        await send_response(interaction,f"No Apollo messages found in last {limit} messages.")
     else:
-        await interaction.response.send_message(f"Found {found} Apollo messages.", ephemeral=True)
+        await send_response(interaction,f"Found {found} Apollo messages.", ephemeral=True)
 
 
 # lets list recent messages and their authors
@@ -401,7 +555,7 @@ async def recent_authors(interaction: discord.Interaction, limit: int = 20):
         authors.add(msg.author.name)
 
     result = ", ".join(authors)
-    await interaction.response.send_message(
+    await send_response(interaction,
         f"Recent authors from last {limit} messages:\n{result}"
     )
 
@@ -410,7 +564,7 @@ async def recent_authors(interaction: discord.Interaction, limit: int = 20):
 @bot.tree.command(name="hilf", description="Show all available commands and their usage.")
 async def hilf(interaction: discord.Interaction):
 
-    await interaction.response.defer()  # defer in case it takes a moment
+    await defer_response(interaction)  # defer in case it takes a moment
 
     help_text = """
         **Attendance Bot Commands:**
@@ -443,7 +597,7 @@ async def hilf(interaction: discord.Interaction):
 @bot.tree.command(name="staff_meeting_notes", description="Paste staff meeting note template.")
 async def staff_meeting_notes(interaction: discord.Interaction):
 
-    await interaction.response.defer()  # defer in case it takes a moment
+    await defer_response(interaction)  # defer in case it takes a moment
 
     notes_text = """
             Staff meeting notetaking template
@@ -521,7 +675,7 @@ async def staff_meeting_notes(interaction: discord.Interaction):
 async def debug_apollo(interaction: discord.Interaction, limit: int = 50):
 
 
-    await interaction.response.defer()
+    await defer_response(interaction)
     found = False
     messages = []
 
@@ -579,7 +733,7 @@ async def debug_duplicates(interaction: discord.Interaction):
     duplicates = {k: v for k, v in seen.items() if len(v) > 1}
 
     # Defer in case it takes time
-    await interaction.response.defer()
+    await defer_response(interaction)
 
     if not duplicates:
         await interaction.followup.send("No username inconsistencies found.")
@@ -612,11 +766,11 @@ async def scan_apollo(interaction: discord.Interaction, limit: int = 18):
     # also, if you dont want to hard-code the channel id and instead want to type the channel id as an argument to the command, you can do so
     target_channel = bot.get_channel(int(bot_config.CHANNEL_ID))
     if not target_channel:
-        await interaction.response.send_message("Failed to fetch the announcements channel.")
+        await send_response(interaction,"Failed to fetch the announcements channel.")
         return
 
     # the thining is "the bot is thinking", which is set to true
-    await interaction.response.defer(thinking=True)
+    await defer_response(interaction, thinking=True)
 
     # NOTE -> here on, we will be focusing on scanning the actual apollo messages
 
@@ -695,11 +849,12 @@ async def scan_apollo(interaction: discord.Interaction, limit: int = 18):
             normalized_attendees = [(normalize_name(name), name) for name in attendees]
 
             # append the MAIN list, at global level which is keeping track of mapping the attributes to the id's like we see below
-            event_log.append({
-                "event_id": msg.id,
-                "accepted": normalized_attendees,
-                "declined": normalized_declined
-            })
+            event = EventEntry(
+                event_id=msg.id,
+                accepted=normalized_attendees,
+                declined=normalized_declined
+            )
+            event_log.add_event(event)
 
             # now im "pretty printing" it so i dont want to see ".username_x" but their actual server name like in a milsim server (Pvt M. Cooper)
             # for every user_id and pretty name in each of the lists ie, "attendees" and "declined", we first want to check if they are already logged
@@ -726,7 +881,8 @@ async def scan_apollo(interaction: discord.Interaction, limit: int = 18):
 @app_commands.describe(limit="How many recent messages to scan (default is 50)")
 async def scan_all_reactions(interaction: discord.Interaction, limit: app_commands.Range[int, 1, 100] = 50):
 
-    await interaction.response.defer(thinking=True)  # defer in case it takes a moment
+
+    await defer_response(interaction,thinking=True)  # defer in case it takes a moment
 
     # initialise scanned to 0, and a dict of emoji lists
     scanned = 0
@@ -776,103 +932,57 @@ async def scan_all_reactions(interaction: discord.Interaction, limit: app_comman
 
 # The command to show the leaderboard
 # for slash commands using @bot.tree.command, the callback function must accept a discord.Interaction as the first argument, not ctx
-# wherever using ctx.send(), it should become interaction.response.send_message() or interaction.followup.send() depending on 
+# wherever using ctx.send(), it should become send_response(interaction,) or interaction.followup.send() depending on 
 # whether we're deferring the response.
-@bot.tree.command(name="leaderboard", description="Show a ranked summary leaderboard of accepted and declined for the last 8 events")
+@bot.tree.command(name="leaderboard",
+                  description="Show a ranked summary leaderboard of accepted and declined for the last 8 events")
 async def leaderboard(interaction: discord.Interaction):
-
-    # if the global dict "event_log" is empty, then no messages have been scanned
-    if attendance_log.total_entries == 0:
-        await interaction.response.send_message("No events have been scanned yet.")
+    if event_log.total_events == 0:
+        await send_response(interaction, "No events have been scanned yet.")
         return
+    await defer_response(interaction)
 
-    # ser recent events to the event_log dict but only 8 bot messages from Apollo
-    recent_events = event_log[-8:]
+    # Get participation summary
+    participation_data = event_log.get_all_participants()
 
-    # now we want to set a dict for each type of reaction 
-    # NOTE--- in this case its only accepted and declined because thats my use case, you can have multiple, just follow this template/general idea
-
-    # the general idea being, we want EACH parsed representation of a type of reaction-user mapping to be its own datastructure for cleanliness and 
-    # separation of concerns. I want the number of declined and accepted, a set of unique users and a dict of pretty names (nickname scanned by "scan_apollo")
-    accepted_count = defaultdict(int)
-    declined_count = defaultdict(int)
-    unique_users = set()
-    pretty_names = {}
-
-    # for every event in the scanned recent events, we will be going over the accepted reactions and declined reactions
-    for event in recent_events:
-
-        # then for each normal user_id and the pretty version thereof in the accepted category list of that event,
-        for user_id, pretty in event["accepted"]:
-
-            # increment the accepted count dict by 1, then for every user_id in the pretty_names dict, we set that to the pretty ie, the nickname, and 
-            # add that user_id to the set of unique users
-            accepted_count[user_id] += 1
-            pretty_names[user_id] = pretty
-            unique_users.add(user_id)
-
-        # similar for declined users, just that we use event.get, a temp list of declined while iterating, to keep track of how many user_id and pretty
-        for user_id, pretty in event.get("declined", []):
-
-            # increment the declined users by 1, add that user_id to the unique users set, and strip any trailing/leading whitespace before setting
-            # those user_id equal to the user_id in the pretty_names dict
-            declined_count[user_id] += 1
-            unique_users.add(user_id)
-            pretty_names[user_id] = pretty.strip()
-
-    # now we want to sort the accepted users, bu counting that dict and using a lambda function that sorts them by descending
-    accepted_sorted = sorted(
-        accepted_count.items(),
-        key=lambda x: (-x[1], x[0])
+    # Sort users by accepted count (descending)
+    sorted_participants = sorted(
+        participation_data.items(),
+        key=lambda x: (-x[1]["accepted"], x[1]["display_name"])
     )
 
-    # we want a similar 'lines' list as previous function to show the leaderboard
+    # Format leaderboard
     lines = [f"**Attendance Leaderboard {datetime.now().strftime('%B')}**"]
-    total_events = len(recent_events)
+    total_events = event_log.total_events
 
-    # and for each user 'user_id' and the 'count' (tuple) we want to number it firstly, then, append to the lines list by using the fstring of how we want
-    # the data to be shown
-    for i, (user_id, count) in enumerate(accepted_sorted, start=1):
-        lines.append(f"{i}. **{pretty_names[user_id]}** - {count}/{total_events} events ✅")
+    # Add each participant's stats
+    for i, (user_id, stats) in enumerate(sorted_participants, start=1):
+        display_name = stats["display_name"]
+        accepted = stats["accepted"]
+        lines.append(f"{i}. **{display_name}** - {accepted}/{total_events} events ✅")
 
-    # check how many unique attendees if at all
-    if accepted_count:
-        lines.append(f"\nTotal unique attendees (accepted): {len(accepted_count)}")
-    else:
-        lines.append("\nNo attendees found in last 8 events.")
+    # Add declined-only users
+    declined_only = [
+        (user_id, stats) for user_id, stats in sorted_participants
+        if stats["accepted"] == 0 and stats["declined"] > 0
+    ]
 
-    # then we make a declined exclusive dict, where we are using dict iteration to check key-name, for value-count, in the declined_count dict, is only there
-    # if its not there in the accepted_count dict. SO, if they declined, they should not be in accepted dict
-    declined_only = {
-        name: count for name, count in declined_count.items()
-        if name not in accepted_count
-    }
-
-    # if that above dict is true, append to the lines list with an fstring to show the data, same as accepted_sorted
     if declined_only:
-
         lines.append(f"\n**Declined (❌)**")
-        declined_sorted = sorted(
-            declined_only.items(),
-            key=lambda x: (-x[1], x[0])
-        )
+        for i, (user_id, stats) in enumerate(declined_only, start=1):
+            display_name = stats["display_name"]
+            declined = stats["declined"]
+            lines.append(f"{i}. **{display_name}** - {declined} declines ❌")
 
-        for i, (norm_name, count) in enumerate(declined_sorted, start=1):
+    # Add total unique responders
+    lines.append(f"\nTotal unique responders: {len(participation_data)}")
 
-            display_name = pretty_names.get(norm_name, norm_name).strip()
-            lines.append(f"{i}. **{display_name}** - {count} declines ❌")
-
-    lines.append(f"\nTotal unique responders: {len(unique_users)}")
-
-    # if message exceeds character limit then send the next chunk in a new line/message
+    # Send the message
     message = "\n".join(lines)
+    await defer_response(interaction, thinking=True)
 
-    # defer response to allow time if needed
-    await interaction.response.defer(thinking=True)
-
-    # send large messages in chunks
     if len(message) > 1900:
-        for chunk in [message[i:i+1900] for i in range(0, len(message), 1900)]:
+        for chunk in [message[i:i + 1900] for i in range(0, len(message), 1900)]:
             await interaction.followup.send(chunk)
     else:
         await interaction.followup.send(message)

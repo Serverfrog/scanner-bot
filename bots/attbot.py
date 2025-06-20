@@ -2,10 +2,14 @@
 This is a unique discord bot that reverse-engineers the closed source event and server management bots using the Discord API, essentially forming a
     closed ecosystem extraction. It scans the activity of other bots in the server by creating a websocket with the hosts, using Discord's Gateway API.
 """
-
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Optional, Dict, Any
 
 import discord
 import os
+
+import yaml
 from dotenv import load_dotenv
 from datetime import datetime
 from discord.ext import commands
@@ -14,44 +18,181 @@ from collections import defaultdict
 import re
 
 
-load_dotenv()
-TOKEN = os.getenv("TOKEN")
-CHANNEL_ID = int(os.getenv("CHANNEL_ID"))
-GUILD_ID = os.getenv("GUILD_ID")
+class BotConfig:
+    def __init__(self):
+        self.TOKEN = None
+        self.CHANNEL_ID = None
+        self.GUILD_ID = None
 
-if not TOKEN:
-    TOKEN = input("Enter your Discord Bot Token: ")
+    @staticmethod
+    def load_config(config_path: str) -> Optional[Dict[str, Any]]:
+        """
+        Load configuration from a YAML file.
+
+        Args:
+            config_path: Path to the YAML configuration file
+
+        Returns:
+            Dictionary containing the configuration or None if loading fails
+
+        Example YAML file:
+            database:
+              host: localhost
+              port: 5432
+            api:
+              key: abc123
+              timeout: 30
+        """
+        path = Path(config_path)
+
+        if not path.exists():
+            print(f"Config file not found: {config_path}")
+            return None
+
+        try:
+            with path.open('r', encoding='utf-8') as file:
+                config = yaml.safe_load(file)
+
+            if not isinstance(config, dict):
+                print("Invalid YAML structure: root element must be a mapping")
+                return None
+
+            return config
+
+        except yaml.YAMLError as e:
+            print(f"Error parsing YAML file: {e}")
+            return None
+        except Exception as e:
+            print(f"Unexpected error loading config: {e}")
+            return None
+
+    @staticmethod
+    def get_env_or_config(env_key: str, config: dict, config_path: str, transform: Optional[callable] = None) -> Any:
+        """
+        Get value from environment variable or fallback to nested config file.
+
+        Args:
+            env_key: Environment variable name
+            config: Configuration dictionary
+            config_path: Dot-separated path in config dictionary (e.g. 'bot.token')
+            transform: Optional function to transform the value
+        """
+        value = os.getenv(env_key)
+
+        if value is None:
+            # Navigate nested dictionary using the path
+            current = config
+            for key in config_path.split('.'):
+                if not isinstance(current, dict):
+                    return None
+                current = current.get(key)
+                if current is None:
+                    return None
+            value = current
+
+        if value is not None and transform is not None:
+            try:
+                value = transform(value)
+            except (ValueError, TypeError) as e:
+                print(f"Error transforming value for {env_key}: {e}")
+                return None
+
+        return value
+
+    @staticmethod
+    def is_valid_snowflake(s):
+        """
+        Check if the given string is a valid Discord snowflake.
+
+        A Discord snowflake must consist of 17 to 20 digits.
+
+        Args:
+            s (str): The string to be checked.
+
+        Returns:
+            bool: True if the string is valid as a Discord snowflake,
+            otherwise False.
+        """
+
+        return bool(re.fullmatch(r"\d{17,20}", s))
+
+    def initialize(self):
+        """Initialize and validate bot configuration."""
+        load_dotenv()
+        config = self.load_config('config.yaml')
+
+        # Get values with fallback
+        self.TOKEN = self.get_env_or_config("TOKEN", config, "bot.token", str)
+        self.CHANNEL_ID = self.get_env_or_config("CHANNEL_ID", config, "bot.channel_id", int)
+        self.GUILD_ID = self.get_env_or_config("GUILD_ID", config, "bot.guild_id", str)
+
+        if not self.TOKEN:
+            print("Invalid Discord Bot Token.")
+            exit(-1)
+
+        if not self.CHANNEL_ID or not self.is_valid_snowflake(str(self.CHANNEL_ID)):
+            print(f"Invalid Channel ID format: {self.CHANNEL_ID}")
+            exit(-1)
+
+        if not self.GUILD_ID or not self.is_valid_snowflake(self.GUILD_ID):
+            print(f"Invalid Guild ID format: {self.GUILD_ID}")
+            exit(-1)
 
 
-def is_valid_snowflake(s):
-    """Returns True if input string is a valid Discord snowflake ID."""
+@dataclass
+class AttendanceEntry:
+    """
+    Class representing an attendance log entry.
 
-    return bool(re.fullmatch(r"\d{17,20}", s))
+    Attributes:
+        user_id (str): The normalized user ID
+        username (str): The pretty/display name of the user
+        event_id (str): The ID of the event
+        response (str): The response type ("accepted" or "declined")
+        timestamp (str): ISO format timestamp of when entry was created
+    """
+    user_id: str
+    username: str
+    event_id: str
+    response: str = "accepted"
+    timestamp: str = None
+
+    def __post_init__(self):
+        """Set timestamp if not provided during initialization"""
+        if self.timestamp is None:
+            self.timestamp = datetime.now().isoformat()
+
+    @property
+    def pseudo_id(self) -> str:
+        """Generate the pseudo_id used for tracking unique entries"""
+        if self.response == "accepted":
+            return f"{self.event_id}-{self.user_id}"
+        return f"{self.event_id}-{self.user_id}-declined"
+
+    def to_dict(self) -> dict:
+        """Convert entry to dictionary format for storage"""
+        return {
+            "timestamp": self.timestamp,
+            "user_id": self.user_id,
+            "username": self.username,
+            "event_id": self.event_id,
+            "response": self.response
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> 'AttendanceEntry':
+        """Create an AttendanceEntry instance from a dictionary"""
+        return cls(
+            user_id=data["user_id"],
+            username=data["username"],
+            event_id=data["event_id"],
+            response=data["response"],
+            timestamp=data["timestamp"]
+        )
 
 
-if not CHANNEL_ID or not is_valid_snowflake(str(CHANNEL_ID)):
-
-    while True:
-        user_input = input("Enter a valid Channel ID (17-20 digits): ")
-
-        if is_valid_snowflake(user_input):
-            CHANNEL_ID = int(user_input)
-            break
-
-        print("Invalid Channel ID format. Try again.")
-
-
-if not GUILD_ID or not is_valid_snowflake(GUILD_ID):
-
-    while True:
-        user_input = input("Enter a valid Guild ID (17-20 digits): ")
-
-        if is_valid_snowflake(user_input):
-            GUILD_ID = user_input
-            break
-
-        print("Invalid Guild ID format. Try again.")
-
+# Create a global config instance
+bot_config = BotConfig()
 
 # Initialize the discord intent object and set most needed paramters from the docs of "discord" to True
 intents = discord.Intents.default()
@@ -156,7 +297,7 @@ async def on_raw_reaction_add(payload):
 
 # TODO: Set up a command like /post_summary to auto-post attendance summaries at the end of the month in a formatted embed.
 # TODO: Host the bot on a server so its always up
-# TODO: Improve /leaderboard by including the event name (if found in embed.title or embed.descriptio) not applicable for our clan (events not named)
+# TODO: Improve /leaderboard by including the event name (if found in embed.title or embed.description) not applicable for our clan (events not named)
 
 # debug attendance log
 @bot.command()
@@ -405,7 +546,7 @@ async def scan_apollo(interaction: discord.Interaction, limit: int = 18):
 
     # Ensure CHANNEL_ID is int or convert
     # also, if you dont want to hard-code the channel id and instead want to type the channel id as an argument to the command, you can do so
-    target_channel = bot.get_channel(int(CHANNEL_ID))
+    target_channel = bot.get_channel(int(bot_config.CHANNEL_ID))
     if not target_channel:
         await interaction.response.send_message("Failed to fetch the announcements channel.")
         return
@@ -672,8 +813,9 @@ async def leaderboard(interaction: discord.Interaction):
     else:
         await interaction.followup.send(message)
 
-# Run the bot with token of server
-bot.run(TOKEN)
-	
-	
-	
+
+
+if __name__ == "__main__":
+    bot_config.initialize()
+    # Run the bot with token of server 
+    bot.run(bot_config.TOKEN)

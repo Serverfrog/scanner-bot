@@ -599,76 +599,24 @@ async def staff_meeting_notes(interaction: discord.Interaction):
 
     await defer_response(interaction)  # defer in case it takes a moment
 
-    notes_text = """
-            Staff meeting notetaking template
+    try:
+        with open('staff_meeting_note.md', 'r', encoding='utf-8') as file:
+            notes_text = file.read()
 
-            `**Promotions and awards**
+        if not notes_text.strip():
+            await interaction.followup.send("Error: Template file is empty!")
+            return
 
+        await interaction.followup.send(notes_text)
 
-            **Astro award:-**
-
-
-            **good conduct**
-
-
-            **Red Cross**
-
-
-            **Promotions**
-
-
-            - Fox Red:
-
-            - Centurion:
-
-            
-
-            **Out of Probation**
-
-
-            __Discussion Part__
-            **Staff Notes**:-
-
-
-            __NCO TRAINED__ (if any)
-
-
-
-            __NCOs__
-
-            **Shughart**
-
-
-            **Hastings**
-
-
-            **Banjo**
-
-
-            **Rydah** 
-
-
-            **Mooses**
-
-
-            **Aranel**
-
-
-            **Miller**
-
-
-            **Astro**
-
-
-            **Landa**
-
-
-            **Adams**
-
-            **__Public Notes__** (if any)`
-"""
-    await interaction.followup.send(notes_text)
-
+    except FileNotFoundError:
+        await interaction.followup.send("Error: Template file 'staff_meeting_note.md' not found!")
+    except PermissionError:
+        await interaction.followup.send("Error: No permission to read the template file!")
+    except UnicodeDecodeError:
+        await interaction.followup.send("Error: Unable to read template file - encoding issue!")
+    except Exception as e:
+        await interaction.followup.send(f"Error: An unexpected error occurred: {str(e)}")
 
 @bot.tree.command(name="debug_apollo", description="Scan recent messages for Apollo embeds and show raw fields for debugging.")
 @app_commands.describe(limit="How many recent messages to scan (default 50)")
@@ -932,7 +880,7 @@ async def scan_all_reactions(interaction: discord.Interaction, limit: app_comman
 
 # The command to show the leaderboard
 # for slash commands using @bot.tree.command, the callback function must accept a discord.Interaction as the first argument, not ctx
-# wherever using ctx.send(), it should become send_response(interaction,) or interaction.followup.send() depending on 
+# wherever using ctx.send(), it should become send_response(interaction,) or interaction.followup.send() depending on
 # whether we're deferring the response.
 @bot.tree.command(name="leaderboard",
                   description="Show a ranked summary leaderboard of accepted and declined for the last 8 events")
@@ -991,5 +939,5 @@ async def leaderboard(interaction: discord.Interaction):
 
 if __name__ == "__main__":
     bot_config.initialize()
-    # Run the bot with token of server 
+    # Run the bot with token of server
     bot.run(bot_config.TOKEN)

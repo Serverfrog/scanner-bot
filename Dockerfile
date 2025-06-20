@@ -5,8 +5,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # bots folder into the container
-COPY bots/ ./bots/
+COPY bots/ /app/
 
-WORKDIR /app/bots
 # Default entrypoint for attbot.py websocket
 CMD ["python", "attbot.py"]

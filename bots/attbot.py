@@ -14,11 +14,11 @@ from typing import Any, TypedDict, Callable
 from typing import List, Tuple, Dict, Optional
 
 import discord
-import pythonjsonlogger
 import yaml
 from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
+from pythonjsonlogger.json import JsonFormatter
 
 
 def setup_logger(name='attbot', log_level=logging.INFO):
@@ -42,7 +42,7 @@ def setup_logger(name='attbot', log_level=logging.INFO):
     stdout_handler = logging.StreamHandler(sys.stdout)
 
     # Create a custom JSON formatter
-    class CustomJsonFormatter(pythonjsonlogger.json):
+    class CustomJsonFormatter(JsonFormatter):
         def add_fields(self, log_record, record, message_dict):
             super(CustomJsonFormatter, self).add_fields(log_record, record, message_dict)
             # Add timestamp in ISO format
@@ -178,7 +178,7 @@ class BotConfig:
         """Initialize and validate bot configuration."""
         load_dotenv()
         config = self.load_config('config.yaml')
-        
+
         if config is None:
             config = {}  # Provide fallback empty dict
 
@@ -309,7 +309,7 @@ class AttendanceLog:
         """Get all entries for a specific event"""
         return [entry for entry in self._entries.values() if entry.event_id == event_id]
 
-    def get_attendance_summary(self) -> TypedDict[str, Dict[str, int]]:
+    def get_attendance_summary(self) -> Dict[str, Dict[str, int]]:
         """Get a summary of accepted/declined counts per user"""
         summary = defaultdict(lambda: {"accepted": 0, "declined": 0})
         for entry in self._entries.values():
@@ -320,7 +320,7 @@ class AttendanceLog:
         """Clear all entries"""
         self._entries.clear()
 
-    def get_all_entries(self) -> TypedDict[str, AttendanceEntry]:
+    def get_all_entries(self) -> Dict[str, AttendanceEntry]:
         """Get all entries"""
         return self._entries.values()
 
@@ -511,10 +511,10 @@ async def send_response(interaction: discord.Interaction, content: str, *, ephem
         content: The content to send
         ephemeral: Whether the message should be ephemeral (default: False)
     """
-    if interaction.response.is_done():   # type: ignore[attr-defined]
+    if interaction.response.is_done(): # type: ignore[attr-defined]
         await interaction.followup.send(content, ephemeral=ephemeral)
     else:
-        await send_response(interaction,content, ephemeral=ephemeral)
+        await interaction.response.send_message(content, ephemeral=ephemeral)# type: ignore[attr-defined]
 
 @bot.event
 async def on_ready():
@@ -534,8 +534,12 @@ async def on_ready():
     Returns:
         None
     """
-    LOG.info("Bot connected successfully", extra={"bot_user": str(bot.user)})
 
+    LOG.info("Bot connected successfully", extra={
+        "bot_user": str(bot.user),
+        "guild-name": bot.guilds,
+    })
+    LOG.info("Bot is running on version %s" % discord.__version__)
     try:
         synced = await bot.tree.sync()
         LOG.info(f"Synced commands: {synced}")

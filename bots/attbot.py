@@ -1,29 +1,80 @@
-""" 
-This is a unique discord bot that reverse-engineers the closed source event and server management bots using the Discord API, essentially forming a
+"""
+This is a unique discord bot that using the closed source event and server management bots using the Discord API, essentially forming a
     closed ecosystem extraction. It scans the activity of other bots in the server by creating a websocket with the hosts, using Discord's Gateway API.
 """
+import logging
 import os
 import re
+import sys
 from collections import defaultdict
-from collections.abc import dict_values
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
-from typing import Dict, Optional, List
+from typing import Any, TypedDict, Callable
+from typing import List, Tuple, Dict, Optional
 
 import discord
+import pythonjsonlogger
 import yaml
 from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
 
 
+def setup_logger(name='attbot', log_level=logging.INFO):
+    """
+    Configure logger with JSON formatting for stdout
+
+    Args:
+        name (str): Logger name
+        log_level (int): Logging level (default: logging.INFO)
+
+    Returns:
+        logging.Logger: Configured logger instance
+    """
+    logger = logging.getLogger(name)
+    logger.setLevel(log_level)
+
+    # Remove existing handlers to avoid duplicates
+    logger.handlers.clear()
+
+    # Create stdout handler
+    stdout_handler = logging.StreamHandler(sys.stdout)
+
+    # Create a custom JSON formatter
+    class CustomJsonFormatter(pythonjsonlogger.json):
+        def add_fields(self, log_record, record, message_dict):
+            super(CustomJsonFormatter, self).add_fields(log_record, record, message_dict)
+            # Add timestamp in ISO format
+            log_record['timestamp'] = datetime.now().isoformat()
+            log_record['level'] = record.levelname
+            log_record['logger'] = record.name
+
+    # Configure formatter
+    formatter = CustomJsonFormatter(
+        '%(timestamp)s %(level)s %(name)s %(message)s'
+    )
+
+    stdout_handler.setFormatter(formatter)
+    logger.addHandler(stdout_handler)
+
+    return logger
+
+LOG = setup_logger('attbot')
+
 class BotConfig:
     def __init__(self):
         self.TOKEN = None
         self.CHANNEL_ID = None
         self.GUILD_ID = None
+        # Database configuration
+        self.DB_HOST = None
+        self.DB_PORT = None
+        self.DB_USER = None
+        self.DB_PASSWORD = None
+        self.DB_DATABASE = None
+        # AttBot configuration
+        self.TEMPLATE_PATH = None
 
     @staticmethod
     def load_config(config_path: str) -> Optional[Dict[str, Any]]:
@@ -37,40 +88,46 @@ class BotConfig:
             Dictionary containing the configuration or None if loading fails
 
         Example YAML file:
+            bot:
+              token: your_discord_bot_token
+              channel_id: 123456789012345678
+              guild_id: 987654321098765432
             database:
               host: localhost
               port: 5432
-            api:
-              key: abc123
-              timeout: 30
+              user: your_username
+              password: your_password
+              database: your_database_name
+            attbot:
+              template: ./staff_meeting_note.md
         """
         path = Path(config_path)
 
         if not path.exists():
-            print(f"Config file not found: {config_path}")
-            return None
+            LOG.error("Config file not found", extra={"config_path": config_path})
+            sys.exit(1)
 
         try:
             with path.open('r', encoding='utf-8') as file:
                 config = yaml.safe_load(file)
 
             if not isinstance(config, dict):
-                print("Invalid YAML structure: root element must be a mapping")
-                return None
+                LOG.error("Invalid YAML structure: root element must be a mapping")
+                sys.exit(1)
 
             return config
 
         except yaml.YAMLError as e:
-            print(f"Error parsing YAML file: {e}")
-            return None
+            LOG.error(f"Error parsing YAML file: {e}", extra={"config_path": config_path})
+            sys.exit(1)
         except Exception as e:
-            print(f"Unexpected error loading config: {e}")
-            return None
+            LOG.error(f"Unexpected error loading config: {e}", extra={"config_path": config_path})
+            sys.exit(1)
 
     @staticmethod
-    def get_env_or_config(env_key: str, config: dict, config_path: str, transform: Optional[callable] = None) -> Any:
+    def get_env_or_config(env_key: str, config: dict, config_path: str, transform: Optional[Callable] = None) -> Any:
         """
-        Get value from environment variable or fallback to nested config file.
+        Get value from an environment variable or fallback to a nested config a file.
 
         Args:
             env_key: Environment variable name
@@ -95,7 +152,7 @@ class BotConfig:
             try:
                 value = transform(value)
             except (ValueError, TypeError) as e:
-                print(f"Error transforming value for {env_key}: {e}")
+                LOG.error(f"Error transforming value for {env_key}: {e}", extra={"config_path": config_path})
                 return None
 
         return value
@@ -121,23 +178,37 @@ class BotConfig:
         """Initialize and validate bot configuration."""
         load_dotenv()
         config = self.load_config('config.yaml')
+        
+        if config is None:
+            config = {}  # Provide fallback empty dict
 
-        # Get values with fallback
+
+        # Get bot values with fallback
         self.TOKEN = self.get_env_or_config("TOKEN", config, "bot.token", str)
         self.CHANNEL_ID = self.get_env_or_config("CHANNEL_ID", config, "bot.channel_id", int)
         self.GUILD_ID = self.get_env_or_config("GUILD_ID", config, "bot.guild_id", str)
 
+        # Get database values with fallback
+        self.DB_HOST = self.get_env_or_config("DB_HOST", config, "database.host", str)
+        self.DB_PORT = self.get_env_or_config("DB_PORT", config, "database.port", int)
+        self.DB_USER = self.get_env_or_config("DB_USER", config, "database.user", str)
+        self.DB_PASSWORD = self.get_env_or_config("DB_PASSWORD", config, "database.password", str)
+        self.DB_DATABASE = self.get_env_or_config("DB_DATABASE", config, "database.database", str)
+
+        # Get attbot values with fallback
+        self.TEMPLATE_PATH = self.get_env_or_config("TEMPLATE_PATH", config, "attbot.template", str)
+
         if not self.TOKEN:
-            print("Invalid Discord Bot Token.")
-            exit(-1)
+            LOG.error("Missing TOKEN value in config file.", extra={"bot.token": self.TOKEN})
+            sys.exit(1)
 
         if not self.CHANNEL_ID or not self.is_valid_snowflake(str(self.CHANNEL_ID)):
-            print(f"Invalid Channel ID format: {self.CHANNEL_ID}")
-            exit(-1)
+            LOG.error("Missing or invalid CHANNEL_ID value in config file.", extra={"bot.channel_id": self.CHANNEL_ID})
+            sys.exit(1)
 
         if not self.GUILD_ID or not self.is_valid_snowflake(self.GUILD_ID):
-            print(f"Invalid Guild ID format: {self.GUILD_ID}")
-            exit(-1)
+            LOG.error("Missing or invalid GUILD_ID value in config file.", extra={"bot.guild_id": self.GUILD_ID})
+            sys.exit(1)
 
 
 @dataclass
@@ -159,7 +230,7 @@ class AttendanceEntry:
     timestamp: str = None
 
     def __post_init__(self):
-        """Set timestamp if not provided during initialization"""
+        """Set a timestamp if not provided during initialization"""
         if self.timestamp is None:
             self.timestamp = datetime.now().isoformat()
 
@@ -200,7 +271,7 @@ class AttendanceLog:
     """
 
     def __init__(self):
-        self._entries: Dict[str, AttendanceEntry] = {}
+        self._entries: TypedDict[str, AttendanceEntry] = {}
 
     def already_logged(self, pseudo_id: str) -> bool:
         """Check if an entry with the given pseudo_id exists"""
@@ -209,7 +280,7 @@ class AttendanceLog:
     def add_entry(self, entry: AttendanceEntry) -> bool:
         """
         Add a new attendance entry if it doesn't exist.
-        Returns True if entry was added, False if it already existed.
+        Returns True if an entry was added, False if it already existed.
         """
         if not self.already_logged(entry.pseudo_id):
             self._entries[entry.pseudo_id] = entry
@@ -234,12 +305,12 @@ class AttendanceLog:
         """Get all entries for a specific user"""
         return [entry for entry in self._entries.values() if entry.user_id == user_id]
 
-    def get_event_entries(self, event_id: str) -> List[AttendanceEntry]:
+    def get_event_entries(self, event_id: int) -> List[AttendanceEntry]:
         """Get all entries for a specific event"""
         return [entry for entry in self._entries.values() if entry.event_id == event_id]
 
-    def get_attendance_summary(self) -> Dict[str, Dict[str, int]]:
-        """Get summary of accepted/declined counts per user"""
+    def get_attendance_summary(self) -> TypedDict[str, Dict[str, int]]:
+        """Get a summary of accepted/declined counts per user"""
         summary = defaultdict(lambda: {"accepted": 0, "declined": 0})
         for entry in self._entries.values():
             summary[entry.username][entry.response] += 1
@@ -249,22 +320,22 @@ class AttendanceLog:
         """Clear all entries"""
         self._entries.clear()
 
-    def get_all_entries(self) -> dict_values[str, AttendanceEntry]:
+    def get_all_entries(self) -> TypedDict[str, AttendanceEntry]:
         """Get all entries"""
         return self._entries.values()
 
     @property
     def total_entries(self) -> int:
-        """Get total number of entries"""
+        """Get a total number of entries"""
         return len(self._entries)
 
     @property
     def unique_users(self) -> set:
-        """Get set of unique usernames"""
+        """Get a set of unique usernames"""
         return {entry.username for entry in self._entries.values()}
 
     def to_dict(self) -> Dict[str, dict]:
-        """Convert all entries to dictionary format"""
+        """Convert all entries to a dictionary format"""
         return {pseudo_id: entry.to_dict() for pseudo_id, entry in self._entries.items()}
 
     @classmethod
@@ -275,11 +346,6 @@ class AttendanceLog:
             entry = AttendanceEntry.from_dict(entry_data)
             log._entries[pseudo_id] = entry
         return log
-
-
-from dataclasses import dataclass
-from typing import List, Tuple, Dict, Optional
-from datetime import datetime
 
 
 @dataclass
@@ -339,12 +405,12 @@ class EventLog:
 
     @property
     def recent_events(self) -> List[EventEntry]:
-        """Get list of recent events"""
+        """Get a list of recent events"""
         return self._events.copy()
 
     @property
     def total_events(self) -> int:
-        """Get total number of events stored"""
+        """Get a total number of events stored"""
         return len(self._events)
 
     def get_event(self, event_id: int) -> Optional[EventEntry]:
@@ -365,7 +431,7 @@ class EventLog:
         return summary
 
     def get_all_participants(self) -> Dict[str, Dict[str, int]]:
-        """Get participation summary for all users"""
+        """Get a participation summary for all users"""
         summary = {}
         for event in self._events:
             for norm_name, display_name in event.accepted:
@@ -380,7 +446,7 @@ class EventLog:
         return summary
 
     def to_dict(self) -> List[dict]:
-        """Convert all events to dictionary format"""
+        """Convert all events to a dictionary format"""
         return [event.to_dict() for event in self._events]
 
     @classmethod
@@ -394,13 +460,13 @@ class EventLog:
 # Create a global config instance
 bot_config = BotConfig()
 
-# Initialize the discord intent object and set most needed paramters from the docs of "discord" to True
+# Initialize the discord intent object and set most of the necessary parameters from the docs of "discord" to True
 intents = discord.Intents.default()
 
 # Required for commands and reading messages
 intents.message_content = True
 
-# obviously, required for reactions, members ids/names and the guild/clan itself
+# required for reactions, member ids/names and the guild/clan itself
 intents.reactions = True
 intents.members = True
 intents.guilds = True
@@ -408,18 +474,17 @@ intents.guilds = True
 # needed to receive message + reaction payloads
 intents.messages = True
 
-# get the bot commands in a variable with usual/standard prefix
+# get the bot commands in a variable with the usual / standard prefix
 bot = commands.Bot(command_prefix="/", intents=intents)
 
 # In-memory log: pseudo_id -> log entry
 attendance_log = AttendanceLog()
 
 # Holds data for the most recent 8 Apollo events
-event_log = EventLog()  # Populate this in /scan_apollo command
-
+event_log = EventLog()  # Populate this in the /scan_apollo command
 
 def normalize_name(name: str) -> str:
-    """ Using regex, we normalise scanned names to pass into other functions. """
+    """ Using regex, we normalize scanned names to pass into other functions. """
     name = name.lower()
     name = re.sub(r"[^\w\s]", "", name)  # remove punctuation
     name = re.sub(r"\s+", " ", name)     # normalize whitespace
@@ -469,15 +534,13 @@ async def on_ready():
     Returns:
         None
     """
-    print(f"Bot is connected as {bot.user}")
-    print(f"Logged in as {bot.user}")
+    LOG.info("Bot connected successfully", extra={"bot_user": str(bot.user)})
 
     try:
         synced = await bot.tree.sync()
-        print(f"Synced {len(synced)} command(s).")
-
+        LOG.info(f"Synced commands: {synced}")
     except Exception as e:
-        print(f"Error syncing commands: {e}")
+        LOG.error(f"Error occurred during syncing commands: {e}")
 
 """
 --- NOTE --- 
@@ -543,7 +606,7 @@ async def show_apollo_embeds(interaction: discord.Interaction, limit: int = 50):
         await send_response(interaction,f"Found {found} Apollo messages.", ephemeral=True)
 
 
-# lets list recent messages and their authors
+# let's list recent messages and their authors
 @bot.tree.command(name="recent_authors", description="Show recent authors from the channel.")
 @app_commands.describe(limit="Number of messages to scan (default 20)")
 async def recent_authors(interaction: discord.Interaction, limit: int = 20):
@@ -600,7 +663,7 @@ async def staff_meeting_notes(interaction: discord.Interaction):
     await defer_response(interaction)  # defer in case it takes a moment
 
     try:
-        with open('staff_meeting_note.md', 'r', encoding='utf-8') as file:
+        with open(bot_config.TEMPLATE_PATH, 'r', encoding='utf-8') as file:
             notes_text = file.read()
 
         if not notes_text.strip():
@@ -610,7 +673,7 @@ async def staff_meeting_notes(interaction: discord.Interaction):
         await interaction.followup.send(notes_text)
 
     except FileNotFoundError:
-        await interaction.followup.send("Error: Template file 'staff_meeting_note.md' not found!")
+        await interaction.followup.send(f"Error: Template file '{bot_config.TEMPLATE_PATH}' not found!")
     except PermissionError:
         await interaction.followup.send("Error: No permission to read the template file!")
     except UnicodeDecodeError:
@@ -703,7 +766,7 @@ async def debug_duplicates(interaction: discord.Interaction):
 @app_commands.describe(limit="Number of messages to scan (default 18, max 100)")
 async def scan_apollo(interaction: discord.Interaction, limit: int = 18):
 
-    # initialise scanned and logged as 0
+    # initialize scanned and logged as 0
     scanned = 0
     logged = 0
 
@@ -711,31 +774,31 @@ async def scan_apollo(interaction: discord.Interaction, limit: int = 18):
     limit = min(limit, 100)
 
     # Ensure CHANNEL_ID is int or convert
-    # also, if you dont want to hard-code the channel id and instead want to type the channel id as an argument to the command, you can do so
+    # also, if you don't want to hard-code the channel id and instead want to type the channel id as an argument to the command, you can do so
     target_channel = bot.get_channel(int(bot_config.CHANNEL_ID))
     if not target_channel:
         await send_response(interaction,"Failed to fetch the announcements channel.")
         return
 
-    # the thining is "the bot is thinking", which is set to true
+    # the thinking is "the bot is thinking", which is set to true
     await defer_response(interaction, thinking=True)
 
     # NOTE -> here on, we will be focusing on scanning the actual apollo messages
 
-    # for every message in the target channel, with the current limit of how many prior messages to scan, we will check if its a message by apollo first
+    # for every message in the target channel, with the current limit of how many prior messages to scan, we will check if it's a message by apollo first
     async for msg in target_channel.history(limit=limit):
         if "Apollo" not in msg.author.name:
             continue
         
-        # if it is apollo, increment scanned messages count by 1
+        # if it is an apollo, increment scanned messages count by 1
         scanned += 1
 
         # ---- NOTE ----
-        # the way Apollo does its ✅, ❌ for example is not the actual emoji, that would be :white_check_mark: and :x: . Rather apollo has its own
+        # the way Apollo does its ✅, ❌ for example, is not the actual emoji, that would be :white_check_mark: and :x: . Rather, apollo has its own
         # server side embeds which it displays as those emojis in its default functionality, for attendance of the event as:
         # :accepted: :declined:
 
-        # NOTE: The "embed" object here, refers to an instance of discord.Embed, which is a class provided by the discord.py library representing 
+        # NOTE: The "embed" object here refers to an instance of discord.Embed, which is a class provided by the discord.py library representing
         # a rich content "embed" attached to a Discord message. 
         # Discord allows bots and users to send rich messages containing fields, colors, thumbnails, and descriptions
 
@@ -752,19 +815,19 @@ async def scan_apollo(interaction: discord.Interaction, limit: int = 18):
                 Field 2: Name = "Declined ❌", Value = "- Pvt Ray" 
         """
 
-        # then for each embed in the the message embeds, set a list of what embed we want to keep track of ie: here we keep track of attendees and declined
-        # but that goes for literally anything else, using any other of apollo's function, thats why the "/show_apollo_embeds" function exists
+        # then for each embed in the message embeds, set a list of what embed we want to keep track of i.e.: here we keep track of attendees and declined,
+        # but that goes for literally anything else, using any other of apollo's function, that's why the "/show_apollo_embeds" function exists,
         # So we are looping through all embed objects attached to a single message 'msg'
         for embed in msg.embeds:
             attendees = []
             declined = []
 
-            # then fo each field in the embeds' fields, check for both accepted and declined
+            # then for each field in the embeds' fields, check for both accepted and declined
             # embed.fields is a list of named fields in that embed (e.g., "Accepted", "Declined").
             for field in embed.fields:
 
-                # strip them of their standard apollo format, and appent the plain names to the attendees dict, do the same for declined
-                # parse the .value of each field to extract user names by "normalising" them
+                # strip them of their standard apollo format and append the plain names to the attendees dict, do the same for declined
+                # parse the .value of each field to extract usernames by "normalizing" them
                 if "accepted" in field.name.lower():
                     for line in field.value.split("\n"):
                         name = line.strip("- ").strip()
@@ -777,9 +840,9 @@ async def scan_apollo(interaction: discord.Interaction, limit: int = 18):
                         if name:
                             declined.append(name)
 
-            # the embed object description, is how the bot parses each description for each line in the description of event but remember:
-            # this condition is outside the field loop, but inside the main msg embed loop so the description embed is here, for this specific use case,
-            # showing the 
+            # the embed object description is how the bot parses each description for each line in the description of event but remember:
+            # this condition is outside the field loop, but inside the main msg embed loop, so the description embed here is for this specific use case,
+            # showing the attendees
             if embed.description:
                 for line in embed.description.split("\n"):
                     if line.strip().startswith("-"):
@@ -787,11 +850,11 @@ async def scan_apollo(interaction: discord.Interaction, limit: int = 18):
                         if name:
                             attendees.append(name)
 
-            # debug loop for seeing the exact inner workings of the bot embeds in json like format
-            for embed in msg.embeds:
-                print(embed.to_dict())
+            # debug loop for seeing the exact inner workings of the bot embeds in JSON like format
+            for debugEmbed in msg.embeds:
+                logging.info(f"Embed: {debugEmbed}")
 
-            # we then want to get tuples of the names in each of the 2 lists we have so far, and call the normalized_name function on it, 
+            # we then want to get tuples of the names in each of the 2 lists we have so far, and call the normalized_name function on it,
             # to well... normalize them using list iteration
             normalized_declined = [(normalize_name(name), name) for name in declined]
             normalized_attendees = [(normalize_name(name), name) for name in attendees]
@@ -804,9 +867,9 @@ async def scan_apollo(interaction: discord.Interaction, limit: int = 18):
             )
             event_log.add_event(event)
 
-            # now im "pretty printing" it so i dont want to see ".username_x" but their actual server name like in a milsim server (Pvt M. Cooper)
-            # for every user_id and pretty name in each of the lists ie, "attendees" and "declined", we first want to check if they are already logged
-            # by calling the "already_logged" function with the "pseudo_id" to prevent duplicates, and if thats not the casem we append logged by 1
+            # now im "pretty printing" it, so I don't want to see ".username_x" but their actual server name like in a milsim server (Pvt M. Cooper)
+            # for every user_id and pretty name in each of the lists i.e., "attendees" and "declined", we first want to check if they are already logged
+            # by calling the "already_logged" function with the "pseudo_id" to prevent duplicates, and if that's not the case, we append logged by 1
             for user_id, pretty in normalized_attendees:
                 pseudo_id = f"{msg.id}-{user_id}"
                 if not attendance_log.already_logged(pseudo_id):
@@ -832,11 +895,11 @@ async def scan_all_reactions(interaction: discord.Interaction, limit: app_comman
 
     await defer_response(interaction,thinking=True)  # defer in case it takes a moment
 
-    # initialise scanned to 0, and a dict of emoji lists
+    # initialize scanned to 0, and a dict of emoji lists
     scanned = 0
     emoji_summary = defaultdict(list)
 
-    # we want to checn every message in the channel this command is made in, and for every message amount mentioned when making the "/command",
+    # we want to check every message in the channel this command is made in, and for every message amount mentioned when making the "/command",
     # increment the scanned counter
     async for msg in interaction.channel.history(limit=limit):
         scanned += 1
@@ -846,14 +909,14 @@ async def scan_all_reactions(interaction: discord.Interaction, limit: app_comman
 
             users = [user async for user in reaction.users()]
 
-            # Only consider users not bots
+            # Only consider users, not bots
             for user in users:
                 if user.bot:
                     continue
-                
-                # set a var member, using Discord's guild object and use the get_member method for that user.id, also set display_name to that members
-                # display name, if the the user is a member, else just get the discord username (because nickname for non members might not be set)
-                member = interaction.guild.get_member(user.id)  
+
+                # set a var member, using Discord's guild object and use the get_member method for that user.id, also set display_name to that member
+                # display name, if the user is a member, else just get the discord username (because nickname for non-members might not be set)
+                member = interaction.guild.get_member(user.id)
                 display_name = member.display_name if member else user.name
 
                 # append the emoji summary dict with a string representation of the reaction emojis like ":x:, :white_check_mark: ..." on the display_name
@@ -939,5 +1002,5 @@ async def leaderboard(interaction: discord.Interaction):
 
 if __name__ == "__main__":
     bot_config.initialize()
-    # Run the bot with token of server
+    # Run the bot with a token of server
     bot.run(bot_config.TOKEN)

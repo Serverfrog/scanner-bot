@@ -2,20 +2,21 @@
 This is a unique discord bot that reverse-engineers the closed source event and server management bots using the Discord API, essentially forming a
     closed ecosystem extraction. It scans the activity of other bots in the server by creating a websocket with the hosts, using Discord's Gateway API.
 """
+import os
+import re
+from collections import defaultdict
+from collections.abc import dict_values
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Any
+from typing import Dict, Optional, List
 
 import discord
-import os
-
 import yaml
-from dotenv import load_dotenv
-from datetime import datetime
-from discord.ext import commands
 from discord import app_commands
-from collections import defaultdict
-import re
+from discord.ext import commands
+from dotenv import load_dotenv
 
 
 class BotConfig:
@@ -147,13 +148,13 @@ class AttendanceEntry:
     Attributes:
         user_id (str): The normalized user ID
         username (str): The pretty/display name of the user
-        event_id (str): The ID of the event
+        event_id (int): The ID of the event
         response (str): The response type ("accepted" or "declined")
         timestamp (str): ISO format timestamp of when entry was created
     """
     user_id: str
     username: str
-    event_id: str
+    event_id: int
     response: str = "accepted"
     timestamp: str = None
 
@@ -191,6 +192,90 @@ class AttendanceEntry:
         )
 
 
+
+class AttendanceLog:
+    """
+    Class managing a collection of attendance entries.
+    Provides methods for adding, querying, and analyzing attendance data.
+    """
+
+    def __init__(self):
+        self._entries: Dict[str, AttendanceEntry] = {}
+
+    def already_logged(self, pseudo_id: str) -> bool:
+        """Check if an entry with the given pseudo_id exists"""
+        return pseudo_id in self._entries
+
+    def add_entry(self, entry: AttendanceEntry) -> bool:
+        """
+        Add a new attendance entry if it doesn't exist.
+        Returns True if entry was added, False if it already existed.
+        """
+        if not self.already_logged(entry.pseudo_id):
+            self._entries[entry.pseudo_id] = entry
+            return True
+        return False
+
+    def log_attendance(self, user_id: str, username: str, event_id: int, response: str = "accepted") -> bool:
+        """Create and add a new attendance entry"""
+        entry = AttendanceEntry(
+            user_id=user_id,
+            username=username.strip(),
+            event_id=event_id,
+            response=response
+        )
+        return self.add_entry(entry)
+
+    def get_entry(self, pseudo_id: str) -> Optional[AttendanceEntry]:
+        """Retrieve an entry by its pseudo_id"""
+        return self._entries.get(pseudo_id)
+
+    def get_user_entries(self, user_id: str) -> List[AttendanceEntry]:
+        """Get all entries for a specific user"""
+        return [entry for entry in self._entries.values() if entry.user_id == user_id]
+
+    def get_event_entries(self, event_id: str) -> List[AttendanceEntry]:
+        """Get all entries for a specific event"""
+        return [entry for entry in self._entries.values() if entry.event_id == event_id]
+
+    def get_attendance_summary(self) -> Dict[str, Dict[str, int]]:
+        """Get summary of accepted/declined counts per user"""
+        summary = defaultdict(lambda: {"accepted": 0, "declined": 0})
+        for entry in self._entries.values():
+            summary[entry.username][entry.response] += 1
+        return dict(summary)
+
+    def clear(self):
+        """Clear all entries"""
+        self._entries.clear()
+
+    def get_all_entries(self) -> dict_values[str, AttendanceEntry]:
+        """Get all entries"""
+        return self._entries.values()
+
+    @property
+    def total_entries(self) -> int:
+        """Get total number of entries"""
+        return len(self._entries)
+
+    @property
+    def unique_users(self) -> set:
+        """Get set of unique usernames"""
+        return {entry.username for entry in self._entries.values()}
+
+    def to_dict(self) -> Dict[str, dict]:
+        """Convert all entries to dictionary format"""
+        return {pseudo_id: entry.to_dict() for pseudo_id, entry in self._entries.items()}
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, dict]) -> 'AttendanceLog':
+        """Create an AttendanceLog instance from a dictionary"""
+        log = cls()
+        for pseudo_id, entry_data in data.items():
+            entry = AttendanceEntry.from_dict(entry_data)
+            log._entries[pseudo_id] = entry
+        return log
+
 # Create a global config instance
 bot_config = BotConfig()
 
@@ -212,15 +297,10 @@ intents.messages = True
 bot = commands.Bot(command_prefix="/", intents=intents)
 
 # In-memory log: pseudo_id -> log entry
-attendance_log = {}
+attendance_log = AttendanceLog()
 
 # Holds data for the most recent 8 Apollo events
 event_log = []  # Populate this in /scan_apollo command
-
-
-# already logged function that removes duplicates
-def already_logged(pseudo_id):
-    return pseudo_id in attendance_log
 
 
 def normalize_name(name: str) -> str:
@@ -231,18 +311,6 @@ def normalize_name(name: str) -> str:
     return name.strip()
 
 
-def log_attendance(user_id, username, event_id, response="accepted"):
-    normalized_id = normalize_name(user_id)
-
-    entry = AttendanceEntry(
-        user_id=normalized_id,
-        username=username.strip(),
-        event_id=event_id,
-        response=response
-    )
-
-    if entry.pseudo_id not in attendance_log:
-        attendance_log[entry.pseudo_id] = entry.to_dict()
 
 @bot.event
 async def on_ready():
@@ -298,7 +366,7 @@ async def on_raw_reaction_add(payload):
 # debug attendance log
 @bot.command()
 async def dump_attendance(ctx):
-    await ctx.send(f"Current entries: {len(attendance_log)}")
+    await ctx.send(f"Current entries: {attendance_log.total_entries}")
 
 
 # This will print embed descriptions so we can see exactly what text is there (for reverse engineering websocket requests of other bots)
@@ -504,9 +572,9 @@ async def debug_duplicates(interaction: discord.Interaction):
     seen = defaultdict(set)
 
     # Normalize usernames and group them
-    for entry in attendance_log.values():
-        normalized = normalize_name(entry["username"])
-        seen[normalized].add(entry["username"])
+    for entry in attendance_log.get_all_entries():
+        normalized = normalize_name(entry.username)
+        seen[normalized].add(entry.username)
 
     duplicates = {k: v for k, v in seen.items() if len(v) > 1}
 
@@ -638,15 +706,15 @@ async def scan_apollo(interaction: discord.Interaction, limit: int = 18):
             # by calling the "already_logged" function with the "pseudo_id" to prevent duplicates, and if thats not the casem we append logged by 1
             for user_id, pretty in normalized_attendees:
                 pseudo_id = f"{msg.id}-{user_id}"
-                if not already_logged(pseudo_id):
-                    log_attendance(user_id, pretty, msg.id)
+                if not attendance_log.already_logged(pseudo_id):
+                    attendance_log.log_attendance(user_id, pretty, msg.id)
                     logged += 1
 
             # fore declined we do the same, but we pass the response parameter and check for all declined users
             for user_id, pretty in normalized_declined:
                 pseudo_id = f"{msg.id}-{user_id}-declined"
-                if not already_logged(pseudo_id):
-                    log_attendance(user_id, pretty, msg.id, response="declined")
+                if not attendance_log.already_logged(pseudo_id):
+                    attendance_log.log_attendance(user_id, pretty, msg.id, response="declined")
                     logged += 1
 
     await interaction.followup.send(
@@ -714,7 +782,7 @@ async def scan_all_reactions(interaction: discord.Interaction, limit: app_comman
 async def leaderboard(interaction: discord.Interaction):
 
     # if the global dict "event_log" is empty, then no messages have been scanned
-    if len(event_log) == 0:
+    if attendance_log.total_entries == 0:
         await interaction.response.send_message("No events have been scanned yet.")
         return
 
